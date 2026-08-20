@@ -97,8 +97,14 @@ Do not `systemctl enable` anything. The services are started on demand by
 ```bash
 agent start          # pick session, pick which application to capture
 agent status         # services, capture source, session, transcript size
+agent watch          # follow the transcript live in the terminal
 agent stop           # stop capture, build the final summary
 ```
+
+`agent watch` exists because Obsidian re-reads an externally modified file only
+when its window regains focus. During a call the window is behind something else,
+so the note looks frozen while lines are in fact being appended every few
+seconds. The terminal shows them as they land.
 
 Other commands: `agent mute` / `unmute` (stop hearing the audio while it keeps
 recording), `agent interval <sec>`, `agent model <name>`, `agent logs`,

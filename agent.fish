@@ -13,6 +13,7 @@
 #   agent interval [сек]   -- как часто пишутся заметки
 #   agent reset            -- новая чистая сессия заметок
 #   agent restart          -- перезапустить сервисы после правки кода
+#   agent watch            -- живой транскрипт текущей сессии в терминале
 #   agent logs t|h|c       -- логи
 #   agent model [имя]      -- посмотреть или сменить модель
 #   agent stop --all       -- стоп + выгрузить и whisper-server
@@ -383,6 +384,34 @@ end
 
 # --- звук -----------------------------------------------------------------
 
+function sa_watch --description "Живой просмотр транскрипта текущей сессии"
+    # Зачем отдельная команда. Obsidian перечитывает файл, изменённый снаружи,
+    # когда окно получает фокус. Во время созвона оно свёрнуто, и заметка
+    # выглядит застывшей, хотя строки в неё пишутся каждые несколько секунд.
+    # Здесь видно сразу и без фокуса -- это самый быстрый способ убедиться,
+    # что захват жив.
+    set -l d ""
+    if test -f $COLD_STATE
+        set d (jq -r '.session_dir // empty' $COLD_STATE | string collect)
+    end
+    if test -z "$d"
+        echo "Сессия ещё не заведена — смотреть нечего."
+        echo "Пока можно следить за сырым транскриптом:"
+        echo "  tail -F ~/.local/share/study-agent/transcript.log"
+        return 1
+    end
+    set -l path "$STUDY_DIR/$d/Транскрипт.md"
+    if not test -f "$path"
+        echo "Файл транскрипта ещё не создан: $path"
+        return 1
+    end
+    echo "Сессия: $d"
+    echo "Файл:   $path"
+    echo "Ctrl+C — выйти. Ниже появляются строки по мере распознавания."
+    echo ""
+    tail -n 5 -F "$path"
+end
+
 function sa_mute
     set -l mode (agent_audio_state_get mode | string collect)
     if test "$mode" = link
@@ -617,6 +646,7 @@ function sa_help
     echo "agent interval [сек] — как часто пишутся заметки"
     echo "agent reset          — новая чистая сессия заметок"
     echo "agent restart        — перезапустить сервисы"
+    echo "agent watch          — живой транскрипт в терминале"
     echo "agent logs t|h|c     — логи"
     echo "agent model [имя]    — какая модель используется"
     echo "agent asks [N]       — последние обращения к тебе"
@@ -685,6 +715,8 @@ switch "$argv[1]"
         sa_stop $argv[2..-1]
     case restart
         sa_restart
+    case watch tail follow
+        sa_watch
     case status st
         sa_status
     case source src
