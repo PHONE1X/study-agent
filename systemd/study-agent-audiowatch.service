@@ -1,0 +1,12 @@
+[Unit]
+Description=Study agent: audio branch watchdog
+After=study-agent-transcribe.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/study-agent/audio_watch.fish
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=study-agent transcript mirror (live transcript -> Obsidian)
+After=study-agent-transcribe.service
+Requires=study-agent-transcribe.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/study-agent/transcript_mirror.fish
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

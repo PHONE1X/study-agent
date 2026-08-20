@@ -1,0 +1,13 @@
+[Unit]
+Description=study-agent cold path (periodic Obsidian note summarization)
+After=study-agent-transcribe.service
+Requires=study-agent-transcribe.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/study-agent/cold_path_daemon.fish
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

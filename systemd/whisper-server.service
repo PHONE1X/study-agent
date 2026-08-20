@@ -1,0 +1,12 @@
+[Unit]
+Description=whisper.cpp server (study-agent transcription backend)
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/whisper.cpp/build/bin/whisper-server -m %h/whisper.cpp/models/ggml-large-v3-turbo.bin -l ru --host 127.0.0.1 --port 8080 --vad --vad-model %h/whisper.cpp/models/ggml-silero-v5.1.2.bin -bs 5 -bo 5 -sns
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

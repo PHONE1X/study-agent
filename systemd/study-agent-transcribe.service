@@ -1,0 +1,13 @@
+[Unit]
+Description=study-agent transcription loop (chunked capture -> whisper-server)
+After=pipewire.service whisper-server.service
+Requires=whisper-server.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/study-agent/transcribe_loop.fish
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
