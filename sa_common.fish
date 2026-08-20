@@ -6,6 +6,16 @@ set -g SA_DATA_DIR ~/.local/share/study-agent
 set -g SA_MODEL_FILE $SA_DATA_DIR/model
 set -g SA_DEFAULT_MODEL qwen3:8b
 
+# Размер контекста модели. По умолчанию Ollama даёт 4096 токенов, и этого не
+# хватает: под генерацию резервируется место, реально на вход остаётся около
+# 2000 токенов. Всё, что длиннее, Ollama молча обрезает -- конспект собирался
+# по огрызку материала и потому не менялся по ходу занятия.
+#
+# ВАЖНО: значение должно быть одинаковым во ВСЕХ запросах, включая прогрев.
+# При смене num_ctx Ollama перезагружает модель (~7 секунд), поэтому разные
+# значения у разных вызовов означали бы перезагрузку на каждом переключении.
+set -g SA_NUM_CTX 32768
+
 function sa_model --description "Имя модели Ollama для всех запросов агента"
     if test -f $SA_MODEL_FILE
         set -l m (cat $SA_MODEL_FILE 2>/dev/null | string trim | string collect)
@@ -43,5 +53,5 @@ function sa_model_warm --description "Заранее поднимает моде
     set -l m (sa_model | string collect)
     curl -s -m 120 -X POST http://127.0.0.1:11434/api/generate \
         -H "Content-Type: application/json" \
-        -d (jq -nc --arg m "$m" '{model: $m, prompt: "ок", think: false, stream: false, keep_alive: -1}') >/dev/null 2>&1
+        -d (jq -nc --arg m "$m" --argjson ctx $SA_NUM_CTX '{model: $m, prompt: "ок", think: false, stream: false, keep_alive: -1, options: {num_ctx: $ctx}}') >/dev/null 2>&1
 end

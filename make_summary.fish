@@ -53,14 +53,18 @@ set -g STUDY_DIR $SA_STUDY_DIR
 # Потолок на один промпт. Видеокарта подрезана по частоте, а обработка промпта
 # упирается именно в вычисления, поэтому длинный материал сначала сжимается
 # группами, и только потом собирается целиком.
-set -g MAX_CHUNK_CHARS 5000
+# Порог, после которого материал предварительно сжимается кусками. Он был
+# рассчитан на контекст 4096 токенов; при SA_NUM_CTX=32768 материал типичного
+# занятия проходит целиком, и лишнее сжатие только теряет конкретику -- каждый
+# проход через модель что-то отбрасывает.
+set -g MAX_CHUNK_CHARS 24000
 
 function ollama_ask --argument-names prompt timeout_s
     if test -z "$timeout_s"
         set timeout_s 180
     end
-    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" \
-        '{model: $model, prompt: $prompt, think: false, stream: false}')
+    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" --argjson ctx $SA_NUM_CTX \
+        '{model: $model, prompt: $prompt, think: false, stream: false, options: {num_ctx: $ctx}}')
     curl -s -m $timeout_s -X POST $OLLAMA_URL -H "Content-Type: application/json" -d "$payload" \
         | jq -r '.response // empty' | string trim | string collect
 end
@@ -69,8 +73,8 @@ function ollama_ask_json --argument-names prompt timeout_s
     if test -z "$timeout_s"
         set timeout_s 180
     end
-    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" \
-        '{model: $model, prompt: $prompt, think: false, stream: false, format: "json"}')
+    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" --argjson ctx $SA_NUM_CTX \
+        '{model: $model, prompt: $prompt, think: false, stream: false, format: "json", options: {num_ctx: $ctx}}')
     curl -s -m $timeout_s -X POST $OLLAMA_URL -H "Content-Type: application/json" -d "$payload" \
         | jq -r '.response // empty' | string trim | string collect
 end
@@ -211,6 +215,9 @@ set -g extras_prompt "Вот конспект по теме «$course_title»:
 
 $narrative
 
+А вот рабочие заметки, из которых он собран. Числа и названия бери ТОЛЬКО отсюда: конспект — это пересказ, и конкретика в нём уже частично потеряна.
+$material
+
 Верни JSON строго такого вида, по-русски:
 {
   \"tldr\": \"3-5 предложений: о чём это целиком и что главное\",
@@ -220,7 +227,9 @@ $narrative
   \"unclear\": [\"место, где формулировка выглядит сомнительно или оборванно\"]
 }
 
-Правила: тезисов 5-10, вопросов 4-8 — они должны проверять понимание, а не память на слова. В terms клади только то, что реально встречалось. В unclear клади только то, что действительно выглядит как ошибка распознавания речи; если такого нет, оставь пустой список."
+Правила: тезисов 5-10, вопросов 4-8 — они должны проверять понимание, а не память на слова. В terms клади только то, что реально встречалось. В unclear клади только то, что действительно выглядит как ошибка распознавания речи; если такого нет, оставь пустой список.
+
+Отдельно про terms. Если в рабочих заметках есть числа — цены, сроки, объёмы, проценты, количество дней — они должны попасть в terms дословно, вместе с единицей измерения. Раздел называется «Термины и числа», и таблица без единого числа при наличии чисел в заметках — это ошибка. Название тарифа без его цены, срок без количества дней — неполные записи."
 
 set -g extras (ollama_ask_json $extras_prompt 240)
 
@@ -241,9 +250,15 @@ begin
     echo "  - обучение/конспект"
     echo "дата: $date_str"
     echo "сессия: \"[[Обзор]]\""
+    echo "обновлён: $(date '+%H:%M')"
     echo "---"
     echo ""
     echo "# $course_title — конспект"
+    echo ""
+    # Пересборка идёт в фоне и пишет только в journalctl, поэтому со стороны
+    # кажется, что конспект появляется исключительно по «agent stop». Штамп
+    # времени прямо в файле -- единственное место, где это видно без логов.
+    echo "*Собран $(date '+%H:%M'). Пересобирается по ходу занятия, а не только по `agent stop`.*"
     echo ""
     if test -n "$tldr"
         echo "> [!abstract] Кратко"

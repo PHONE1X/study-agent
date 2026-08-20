@@ -71,15 +71,15 @@ function slugify --argument-names name
 end
 
 function ollama_generate --argument-names prompt
-    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" \
-        '{model: $model, prompt: $prompt, think: false, stream: false}')
+    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" --argjson ctx $SA_NUM_CTX \
+        '{model: $model, prompt: $prompt, think: false, stream: false, options: {num_ctx: $ctx}}')
     curl -s -m 120 -X POST $OLLAMA_URL -H "Content-Type: application/json" -d "$payload" \
         | jq -r '.response // empty'
 end
 
 function ollama_generate_json --argument-names prompt
-    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" \
-        '{model: $model, prompt: $prompt, think: false, stream: false, format: "json"}')
+    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" --argjson ctx $SA_NUM_CTX \
+        '{model: $model, prompt: $prompt, think: false, stream: false, format: "json", options: {num_ctx: $ctx}}')
     curl -s -m 120 -X POST $OLLAMA_URL -H "Content-Type: application/json" -d "$payload" \
         | jq -r '.response // empty'
 end
@@ -490,6 +490,44 @@ $bullets" >> "$session_path/$segment_file"
     end
 end
 
+# --- сторож утечки памяти в llama-server ----------------------------------
+#
+# Ollama 0.32.14 течёт по хостовой памяти. Измерено по 74 замерам и трём
+# разным запускам модели: RssAnon растёт примерно на 190 МБ в минуту активной
+# работы и на плато не выходит. За восьмичасовую лекцию это десятки гигабайт.
+#
+# Течёт по запросам, а не по времени: в минуты, когда обращений нет, цифра не
+# меняется вообще. Поэтому лечится выгрузкой -- она освобождает всё, а
+# следующий запрос поднимает модель обратно примерно за 5 секунд, что на фоне
+# двухминутного цикла заметок незаметно.
+#
+# Проверка стоит одного чтения /proc и делается ПОСЛЕ цикла, чтобы никогда не
+# выгружать модель посреди генерации.
+if not set -q LLAMA_RSS_LIMIT_MB
+    set -g LLAMA_RSS_LIMIT_MB 5000
+end
+
+function check_model_leak
+    # Конспект собирается в фоне и может идти минуты. Выгрузка в этот момент
+    # оборвала бы сборку, поэтому ждём снятия замка.
+    if test -f $SUMMARY_LOCK
+        return 0
+    end
+    set -l p (pgrep -f 'ollama/llama-server' | head -n1)
+    test -n "$p"; or return 0
+    set -l kb (awk '/^RssAnon:/{print $2}' /proc/$p/status 2>/dev/null)
+    test -n "$kb"; or return 0
+    set -l mb (math "floor($kb / 1024)")
+    if test "$mb" -ge "$LLAMA_RSS_LIMIT_MB"
+        set -l ob (command -v ollama)
+        if test -z "$ob"
+            set ob /usr/bin/ollama
+        end
+        echo "COLD PATH: llama-server занял $mb МБ хостовой памяти — выгружаю модель, следующий запрос поднимет её за ~5 с"
+        $ob stop (sa_model | string collect) >/dev/null 2>&1
+    end
+end
+
 if test "$argv[1]" = "--once"
     cold_path_cycle
     exit 0
@@ -513,4 +551,5 @@ while true
         sleep 8
     end
     cold_path_cycle
+    check_model_leak
 end
