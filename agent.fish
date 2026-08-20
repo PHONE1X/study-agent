@@ -351,6 +351,21 @@ function sa_stop
     agent_capture_release
     echo "Сессия остановлена. Захват снят, звук приложения не тронут."
 
+    # Сегмент, который был открыт на момент остановки, никогда не получает
+    # обычного «закрывающего» перехода (следующего сегмента, который бы его
+    # закрыл, не будет) -- поэтому сворачиваем его в связное описание здесь.
+    if test -f $COLD_STATE
+        set -l seg_dir (jq -r '.session_dir // empty' $COLD_STATE | string collect)
+        set -l seg_num (jq -r '.segment_num // 0' $COLD_STATE)
+        set -l seg_title (jq -r '.segment_title // empty' $COLD_STATE | string collect)
+        set -l seg_file (jq -r '.segment_file // empty' $COLD_STATE | string collect)
+        set -l seg_course (jq -r '.course_title // empty' $COLD_STATE | string collect)
+        if test "$seg_num" -gt 0 -a -n "$seg_dir" -a -n "$seg_file"
+            echo "Сворачиваю последний сегмент («$seg_title») в связное описание..."
+            fish $SA_DIR/finalize_segment.fish "$STUDY_DIR/$seg_dir/$seg_file" "$seg_title" "$seg_course"
+        end
+    end
+
     # Конспект собираем ДО выгрузки модели: он сам её и использует.
     echo ""
     sa_summary
@@ -383,6 +398,34 @@ function sa_reset
 end
 
 # --- звук -----------------------------------------------------------------
+
+function sa_glossary --description "Словарь терминов занятия для распознавания"
+    # Правится прямо во время занятия: transcribe_stream перечитывает файл по
+    # mtime, поэтому дописанный термин начинает действовать со следующего окна.
+    # Перезапуск не нужен -- это единственная настройка агента, которая так
+    # умеет, и сделано это намеренно: коверканье слышно только на ходу.
+    set -l f ~/.config/study-agent/glossary.txt
+    if not test -f $f
+        mkdir -p (dirname $f)
+        cp $SA_DIR/glossary.example.txt $f
+        echo "Создал словарь из образца: $f"
+    end
+    if test (count $argv) -gt 0
+        # agent glossary СЛОВО -- быстро дописать термин, не открывая редактор.
+        for w in $argv
+            echo $w >> $f
+            echo "Добавлено: $w"
+        end
+        echo "Подействует со следующего окна распознавания (до 30 секунд)."
+        return 0
+    end
+    echo "Словарь: $f"
+    echo ""
+    grep -v '^\s*#' $f | string match -rv '^\s*$'
+    echo ""
+    echo "Дописать термин:  agent glossary «слово»"
+    echo "Открыть целиком:  \$EDITOR $f"
+end
 
 function sa_watch --description "Живой просмотр транскрипта текущей сессии"
     # Зачем отдельная команда. Obsidian перечитывает файл, изменённый снаружи,
@@ -647,6 +690,7 @@ function sa_help
     echo "agent reset          — новая чистая сессия заметок"
     echo "agent restart        — перезапустить сервисы"
     echo "agent watch          — живой транскрипт в терминале"
+    echo "agent glossary [сл.] — словарь терминов занятия (без слова — показать)"
     echo "agent logs t|h|c     — логи"
     echo "agent model [имя]    — какая модель используется"
     echo "agent asks [N]       — последние обращения к тебе"
@@ -717,6 +761,8 @@ switch "$argv[1]"
         sa_restart
     case watch tail follow
         sa_watch
+    case glossary gloss словарь
+        sa_glossary $argv[2..-1]
     case status st
         sa_status
     case source src

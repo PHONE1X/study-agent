@@ -110,6 +110,12 @@ Other commands: `agent mute` / `unmute` (stop hearing the audio while it keeps
 recording), `agent interval <sec>`, `agent model <name>`, `agent logs`,
 `agent probe` (dump the audio graph when something does not add up).
 
+`agent glossary [term]` edits `~/.config/study-agent/glossary.txt` (created from
+`glossary.example.txt` on first use) — names, products and jargon that whisper
+tends to mishear. Add a term mid-session and it takes effect on the next
+recognition window, no restart: `agent glossary "Kubernetes"`. Without an
+argument it prints the current list.
+
 ## Configuration
 
 `~/.config/study-agent/config.env`, read by both the fish and the Python parts:

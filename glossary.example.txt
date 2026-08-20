@@ -1,0 +1,22 @@
+# Session glossary: one term per line, "#" for comments.
+#
+# Copy to ~/.config/study-agent/glossary.txt and fill in the names, products and
+# jargon of the session you are about to record.
+#
+# Why this exists. Whisper biases word choice towards whatever appears in its
+# prompt. Without a glossary, a product name it has never seen comes out as a
+# phonetically similar word — and the note-writing model does not flag the word
+# it failed to recognise. It invents a confident definition for it instead, so a
+# speech-recognition error becomes a fabricated fact in your study notes.
+#
+# The file is re-read while running. When you hear a term come out mangled, add
+# it and the next window picks it up — no restart.
+#
+# Keep it short, roughly 300 characters total. It shares whisper's prompt window
+# with the tail of the previous phrase, and crowding that out costs you
+# punctuation.
+
+Acme Cloud
+PostgreSQL
+Kubernetes
+OAuth

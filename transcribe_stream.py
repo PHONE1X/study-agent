@@ -103,6 +103,57 @@ WINDOW_BYTES = int(WINDOW_SEC * BPS)
 PRIMER = ("Итак, продолжаем. Смотрите, что здесь происходит: сначала одно, "
           "потом другое. Понятно, да? Хорошо, идём дальше.")
 
+# Словарь занятия: названия продуктов, имена, термины -- всё, что распознавание
+# коверкает, потому что не знает.
+#
+# Зачем. Whisper смещает выбор слов в сторону тех, что встретились в prompt'е.
+# Без словаря «VK Workspace» становится «VACA Workspace» и попадает в ЗАГОЛОВОК
+# раздела, «Битрикс» -- в «Bittrex» (это биржа криптовалют), а «суперапп» -- в
+# «SuperAPI». Последнее хуже всего: модель конспекта не помечает непонятое
+# слово, а уверенно сочиняет ему определение («интеграционный интерфейс»),
+# которого в записи не было. Ошибка распознавания превращается в выдуманный
+# факт в учебных заметках.
+#
+# Файл перечитывается на лету по mtime: термин, который сегодня коверкается,
+# дописывается прямо посреди занятия, без перезапуска агента.
+GLOSSARY_FILE = os.path.expanduser("~/.config/study-agent/glossary.txt")
+# У whisper окно prompt'а около 224 токенов, и его делит с ним контекст
+# предыдущей фразы. Словарь ограничен, чтобы не вытеснить этот контекст.
+GLOSSARY_MAX_CHARS = 300
+
+_gloss_cache = {"mtime": None, "text": ""}
+
+
+def glossary_text():
+    try:
+        mtime = os.path.getmtime(GLOSSARY_FILE)
+    except OSError:
+        _gloss_cache["mtime"] = None
+        _gloss_cache["text"] = ""
+        return ""
+    if _gloss_cache["mtime"] == mtime:
+        return _gloss_cache["text"]
+
+    terms = []
+    try:
+        with open(GLOSSARY_FILE, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    terms.append(line)
+    except OSError:
+        terms = []
+
+    text = ""
+    if terms:
+        # Именно предложение, а не голый перечень: whisper подражает стилю
+        # prompt'а, и список через запятую без точки портит пунктуацию вывода.
+        joined = ", ".join(terms)[:GLOSSARY_MAX_CHARS].rstrip(", ")
+        text = "В записи звучат: " + joined + "."
+    _gloss_cache["mtime"] = mtime
+    _gloss_cache["text"] = text
+    return text
+
 HALLUCINATIONS = {
     "продолжение следует",
     "спасибо за просмотр",
@@ -170,9 +221,13 @@ def punct_ok(s):
 
 def build_prompt(prev_text):
     tail = (prev_text or "")[-250:]
-    if punct_ok(tail):
-        return tail
-    return PRIMER
+    base = tail if punct_ok(tail) else PRIMER
+    # Словарь идёт первым: он должен действовать и тогда, когда контекст
+    # предыдущей фразы признан негодным и заменён на PRIMER.
+    gloss = glossary_text()
+    if gloss:
+        return gloss + " " + base
+    return base
 
 
 def tokens(s):

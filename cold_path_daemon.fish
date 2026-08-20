@@ -70,16 +70,30 @@ function slugify --argument-names name
         | string trim -c '-' | string sub -l 40
 end
 
-function ollama_generate --argument-names prompt
-    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" --argjson ctx $SA_NUM_CTX \
-        '{model: $model, prompt: $prompt, think: false, stream: false, options: {num_ctx: $ctx}}')
+# num_predict ограничивает потолок генерации. Живой прогон 2026-08-20 показал:
+# whisper-server держит -np 1 (один слот), и его же дёргает draft_answer.fish
+# из горячего пути. Без потолка одна генерация конспекта могла тянуться сколько
+# угодно и занимать единственный слот -- обращение по имени, прозвучавшее в
+# этот момент, ждало в очереди позади конспекта, и черновик ответа приходил
+# с задержкой в 10-15 с, иногда по уже неактуальному куску контекста. Потолок
+# не убирает очередь совсем (слот всё равно один), но ограничивает худший
+# случай ожидания.
+function ollama_generate --argument-names prompt max_tokens
+    if test -z "$max_tokens"
+        set max_tokens 300
+    end
+    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" --argjson ctx $SA_NUM_CTX --argjson np $max_tokens \
+        '{model: $model, prompt: $prompt, think: false, stream: false, options: {num_ctx: $ctx, num_predict: $np}}')
     curl -s -m 120 -X POST $OLLAMA_URL -H "Content-Type: application/json" -d "$payload" \
         | jq -r '.response // empty'
 end
 
-function ollama_generate_json --argument-names prompt
-    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" --argjson ctx $SA_NUM_CTX \
-        '{model: $model, prompt: $prompt, think: false, stream: false, format: "json", options: {num_ctx: $ctx}}')
+function ollama_generate_json --argument-names prompt max_tokens
+    if test -z "$max_tokens"
+        set max_tokens 300
+    end
+    set -l payload (jq -nc --arg model $MODEL --arg prompt "$prompt" --argjson ctx $SA_NUM_CTX --argjson np $max_tokens \
+        '{model: $model, prompt: $prompt, think: false, stream: false, format: "json", options: {num_ctx: $ctx, num_predict: $np}}')
     curl -s -m 120 -X POST $OLLAMA_URL -H "Content-Type: application/json" -d "$payload" \
         | jq -r '.response // empty'
 end
@@ -194,7 +208,7 @@ function cold_path_cycle
 $new_lines
 
 Дай короткое название теме курса (3-6 слов, без кавычек, без точки в конце) — то, о чём эта сессия в целом. Ответь только названием, без пояснений."
-        set -l raw_title (ollama_generate $title_prompt | string trim | string collect)
+        set -l raw_title (ollama_generate $title_prompt 40 | string trim | string collect)
         if not plausible_title "$raw_title"
             echo "COLD PATH: модель не дала короткое название курса (ответ не похож на название) -- использую заглушку" >&2
             set raw_title ""
@@ -245,6 +259,14 @@ $new_lines
 
     set -l session_path "$STUDY_DIR/$session_dir"
 
+    # Слепок закрываемого сегмента ДО того, как ниже decide_prompt/новый
+    # сегмент перезапишут segment_title/segment_file. Нужен, чтобы после
+    # открытия нового сегмента свернуть только что закрытый в связное
+    # описание -- см. finalize_segment.fish ниже.
+    set -l closing_segment_num $segment_num
+    set -l closing_segment_title $segment_title
+    set -l closing_segment_file $segment_file
+
     # Вторая страховка: папку могли удалить между проверкой выше и записью,
     # либо Обзор.md пропал отдельно от папки. Без mkdir перенаправление ">>"
     # молча падает, и цикл заканчивается ничем.
@@ -274,7 +296,7 @@ $new_lines
 $new_lines
 
 Дай короткое название именно ЭТОМУ фрагменту (3-6 слов, без кавычек, без точки в конце) — о чём говорят прямо здесь. Не описывай курс целиком. Ответь только названием."
-        set -l raw (ollama_generate $seg_prompt | string trim | string collect)
+        set -l raw (ollama_generate $seg_prompt 40 | string trim | string collect)
         if not plausible_title "$raw"
             echo "COLD PATH: модель не дала короткое название сегмента -- использую заглушку" >&2
             set raw ""
@@ -297,7 +319,7 @@ $new_lines
 Новый сегмент НЕ нужен при новом примере, отступлении, шутке, вопросе из зала или продолжении той же мысли.
 
 Рекламная вставка (промокод, скидка, аукцион, «ссылка в описании», хостинг, спонсор) — ЭТО НЕ СМЕНА ТЕМЫ. Реклама вклинивается в середину занятия и заканчивается, после чего докладчик возвращается к прежней теме. Никогда не заводи сегмент под рекламу и не называй сегмент по рекламодателю. Ответь только JSON вида {\"new_segment\": true, \"title\": \"короткое название новой темы\"} или {\"new_segment\": false, \"title\": \"\"}."
-        set -l decision (ollama_generate_json $decide_prompt | string collect)
+        set -l decision (ollama_generate_json $decide_prompt 80 | string collect)
         set -l is_new (echo "$decision" | jq -r '.new_segment // false' 2>/dev/null)
         if test "$is_new" = "true"
             set new_segment true
@@ -331,6 +353,14 @@ $new_lines
         set -l link_name (string replace -r '\\.md$' '' -- $segment_file)
         echo "- [[$link_name|$segment_title]] — $t_start" >> "$session_path/Обзор.md"
         echo "COLD PATH: new segment $num_padded -- $segment_title"
+
+        # Закрытый сегмент сворачивается в связное описание в фоне, не
+        # блокируя открытие нового. closing_segment_num=0 значит, что это
+        # самый первый сегмент сессии -- закрывать ещё нечего.
+        if test "$closing_segment_num" -gt 0 -a -n "$closing_segment_file"
+            fish $SA_DIR_SELF/finalize_segment.fish "$session_path/$closing_segment_file" "$closing_segment_title" "$course_title" &
+            disown
+        end
     end
 
     # Хвост предыдущего фрагмента. Без него местоимения повисают в воздухе:
@@ -421,7 +451,7 @@ $new_lines"
     # string collect обязателен и здесь. Без него многострочный ответ модели
     # превращался в список, а echo склеивал его пробелами -- именно поэтому
     # маркированный список выглядел как одна сплошная строка.
-    set -l summary (ollama_generate $summarize_prompt | string trim | string collect)
+    set -l summary (ollama_generate $summarize_prompt 500 | string trim | string collect)
 
     # Гвард формата: модель иногда игнорирует «только список» и отвечает
     # обычным текстом (типичный симптом -- фразы вида «похоже, вы прислали
@@ -434,7 +464,7 @@ $new_lines"
             echo "COLD PATH: ответ модели не в формате списка ($t_range), переспрашиваю" >&2
             set summary (ollama_generate "$summarize_prompt
 
-Важно: в прошлый раз ты ответил не списком, а обычным текстом. Ответь СТРОГО списком: каждая строка начинается с «- », без вступлений, без заключений, без комментариев о самом ответе." | string trim | string collect)
+Важно: в прошлый раз ты ответил не списком, а обычным текстом. Ответь СТРОГО списком: каждая строка начинается с «- », без вступлений, без заключений, без комментариев о самом ответе." 500 | string trim | string collect)
             set bullets (bullets_only $summary | string collect)
         end
         # Последний рубеж перед вольтом: пункт, слов которого во фрагменте нет,
