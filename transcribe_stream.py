@@ -60,6 +60,7 @@ import io
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import time
@@ -77,6 +78,13 @@ EDGE_GUARD_SEC = 0.30    # отступ назад от границы фраз�
                          # неточны на десятые доли, лучше повторить чуть звука,
                          # чем срезать начало следующего слова
 MAX_BUFFER_SEC = 180     # если вдруг отстали от потока -- выбросить самое старое
+
+# Пороги для распознавания сломанного потока захвата. Замерено вживую:
+# нормальная речь в звонке -- RMS около 1900, ничего у предела; испорченный
+# поток -- RMS 16000+ и почти 2% отсчётов у предела.
+BROKEN_RMS = 8000        # выше этого при отсутствии речи -- поток испорчен
+LIVE_RMS = 400           # выше этого в звуке точно что-то есть, это не тишина
+MAX_SILENT_WINDOWS = 3   # столько пустых окон подряд при живом звуке терпим
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sa_config
@@ -108,6 +116,9 @@ HALLUCINATIONS = {
     "продолжение",
 }
 
+_credits = re.compile(
+    r"редактор субтитров|корректор|субтитры (сделал|создал|делал|подготовил)"
+    r"|dimatorzok|amara org|субтитры от", re.UNICODE)
 _punct = re.compile(r"[^\w\s]", re.UNICODE)
 _space = re.compile(r"\s+", re.UNICODE)
 
@@ -123,9 +134,16 @@ def is_hallucination(text):
         return True
     if n in HALLUCINATIONS:
         return True
+    # Выдуманные титры с ФАМИЛИЯМИ: «Редактор субтитров А.Семкин Корректор
+    # А.Егорова». Списком такое не поймать -- фамилии каждый раз новые, --
+    # поэтому ловим по роли из титров в короткой строке. Настоящая просьба
+    # («включите субтитры») под это не подходит: там нет ни редактора, ни
+    # корректора, ни «субтитры сделал».
+    words = n.split()
+    if len(words) <= 12 and _credits.search(n):
+        return True
     # «Продолжение следует... Продолжение следует...» -- то же самое, повторённое
     # моделью несколько раз подряд внутри одной строки.
-    words = n.split()
     for h in HALLUCINATIONS:
         hw = h.split()
         if len(hw) >= 2 and words and len(words) % len(hw) == 0:
@@ -270,6 +288,24 @@ def transcribe(pcm, prompt):
     return segs
 
 
+def window_level(pcm):
+    """Громкость окна: (RMS, доля отсчётов у предела).
+
+    Нужно, чтобы отличить тишину от СЛОМАННОГО потока -- см. respawn ниже.
+    """
+    n = len(pcm) // 2
+    if n == 0:
+        return 0.0, 0.0
+    samples = struct.unpack("<%dh" % n, pcm[:n * 2])
+    total = 0
+    clipped = 0
+    for s in samples:
+        total += s * s
+        if s >= 32000 or s <= -32000:
+            clipped += 1
+    return (total / n) ** 0.5, clipped / float(n)
+
+
 def start_parec():
     return subprocess.Popen(
         ["parec", "--device=" + DEVICE, "--rate=" + str(RATE),
@@ -289,6 +325,7 @@ def main():
     consumed = 0          # сколько байт потока уже ушло за левый край окна
     stream_t0 = time.time()
     prev_text = ""        # последняя выданная фраза -- и prompt, и база для склейки
+    silent_streak = 0     # окон подряд без речи при живом звуке
 
     while True:
         block = proc.stdout.read(BPS // 4) if proc.stdout else b""
@@ -322,7 +359,57 @@ def main():
 
         window = bytes(buf[:WINDOW_BYTES])
         win_t0 = stream_t0 + consumed / BPS
+        rms, clip_frac = window_level(window)
         segs = transcribe(window, build_prompt(prev_text))
+
+        # СЛОМАННЫЙ ПОТОК ЗАХВАТА.
+        #
+        # Живой случай: во время конференции транскрипт оборвался на середине,
+        # хотя сервис был жив, связи в графе целы, а звук в agent-capture шёл.
+        # Свежий parec на том же устройстве в ту же секунду читал нормальную
+        # речь (RMS ~1900, ничего у предела), а поток, который висел с момента
+        # запуска, отдавал перегруз (RMS ~16000, 1.8% отсчётов у предела).
+        # Whisper на таком не находит речи вообще и молча возвращает пусто.
+        #
+        # Отличить это от тишины просто: у тишины RMS низкий. Поэтому если
+        # речи не нашлось, а сигнал при этом громкий или бьётся о предел --
+        # виноват не звук, а наш собственный поток, и его надо пересоздать.
+        if not segs and (clip_frac >= 0.005 or rms > BROKEN_RMS):
+            print("TRANSCRIBE: поток захвата испортился (RMS %.0f, у предела %.1f%%) "
+                  "-- пересоздаю parec" % (rms, clip_frac * 100), file=sys.stderr, flush=True)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            time.sleep(1)
+            proc = start_parec()
+            buf.clear()
+            stream_t0 = time.time()
+            consumed = 0
+            silent_streak = 0
+            continue
+
+        # Второй признак того же: речь в звуке явно есть (не тишина), а whisper
+        # раз за разом отдаёт пусто. Одно такое окно -- нормально, три подряд --
+        # это уже не пауза в разговоре.
+        if not segs and rms > LIVE_RMS:
+            silent_streak += 1
+            if silent_streak >= MAX_SILENT_WINDOWS:
+                print("TRANSCRIBE: %d окна подряд без речи при живом звуке -- "
+                      "пересоздаю parec" % silent_streak, file=sys.stderr, flush=True)
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                time.sleep(1)
+                proc = start_parec()
+                buf.clear()
+                stream_t0 = time.time()
+                consumed = 0
+                silent_streak = 0
+                continue
+        elif segs:
+            silent_streak = 0
 
         if not segs:
             # Тишина или whisper ничего не нашёл -- двигаемся на всё окно.
